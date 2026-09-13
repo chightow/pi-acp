@@ -267,7 +267,7 @@ async function handleRequest(id: number | string, method: string, params: any): 
         return;
       }
       sessions.set(sessionId, { pi, model: pi.modelId(), mode: "read-only", effort: pi.effort(), queue: Promise.resolve() });
-      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId(), pi.effort(), pi.availableModels()) });
+      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId(), pi.effort(), await pi.availableModels()) });
       return;
     }
     case METHOD_SESSION_LOAD: {
@@ -318,7 +318,7 @@ async function handleRequest(id: number | string, method: string, params: any): 
         send({
           jsonrpc: "2.0",
           id,
-          result: buildSessionNewResult(sessionId, live.pi.modelId(), live.pi.effort(), live.pi.availableModels()),
+          result: buildSessionNewResult(sessionId, live.pi.modelId(), live.pi.effort(), await live.pi.availableModels()),
         });
         return;
       }
@@ -343,7 +343,7 @@ async function handleRequest(id: number | string, method: string, params: any): 
         return;
       }
       sessions.set(sessionId, { pi, model: pi.modelId(), mode: "read-only", effort: pi.effort(), queue: Promise.resolve() });
-      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId(), pi.effort(), pi.availableModels()) });
+      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId(), pi.effort(), await pi.availableModels()) });
       return;
     }
     case METHOD_SESSION_PROMPT: {
@@ -468,7 +468,7 @@ async function handleRequest(id: number | string, method: string, params: any): 
             }
             rec.model = rec.pi.modelId();
             rec.effort = rec.pi.effort();
-            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, rec.effort, rec.pi.availableModels())));
+            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, rec.effort, await rec.pi.availableModels())));
           }
         } else if (params?.configId === "effort") {
           // Slice 9 — effort knob → pi thinking level. Unknown values throw
@@ -499,7 +499,7 @@ async function handleRequest(id: number | string, method: string, params: any): 
               return;
             }
             rec.effort = actual;
-            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, actual, rec.pi.availableModels())));
+            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, actual, await rec.pi.availableModels())));
           }
         } else if (params?.configId === "mode" && typeof params?.value === "string") {
           rec.mode = params.value;

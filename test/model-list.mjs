@@ -95,10 +95,12 @@ async function main() {
     }
     console.log("ok: echo keeps single-current model fallback");
   } else {
-    // Live path: the catalog. Bound well above 1 so a regression to the
+    // Live path: the usable catalog. Above 1 so a regression to the
     // single-current shape (the session that starved the picker) goes red;
-    // exact count is pi-version-dependent and deliberately unpinned.
-    if (options.length < 100) fail(`model catalog has ${options.length} entries, want the full list`);
+    // exact membership follows this machine's pi auth and is deliberately
+    // unpinned (providers listed below are the audit trail for that).
+    if (options.length < 2) fail(`model catalog has ${options.length} entries, want the usable list`);
+    console.log(`    providers offered: ${[...new Set(options.map((o) => String(o.value).split("/")[0]))].sort().join(", ")}`);
     for (const o of options) {
       if (typeof o?.value !== "string" || !o.value.includes("/")) {
         fail(`model option not provider/id shaped: ${JSON.stringify(o)}`);

@@ -314,37 +314,82 @@ export class PiSession {
   }
 
   /**
-   * Every model pi's runtime knows, as `model`-option entries. Values are
-   * `provider/id` pairs (unambiguous when providers share a bare id); names
-   * are the bare ids for a readable picker, descriptions name the provider.
-   * Sorted for a stable dropdown. Crew harvests this select into its
-   * advertised-model cache, which is what the dashboard picker reads --
-   * without it the picker can only offer the current value back.
+   * Every model this account can actually run, as `model`-option entries.
+   * Values are `provider/id` pairs (unambiguous when providers share a bare
+   * id); names are the bare ids for a readable picker, descriptions name the
+   * provider. Sorted for a stable dropdown. Crew harvests this select into
+   * its advertised-model cache, which is what the dashboard picker reads --
+   * offering unauthenticated providers would put back rows that die at
+   * prompt time, the codex lesson applied here (never offer what kills).
+   *
+   * Usability is pi's own verdict per provider
+   * (`modelRuntime.getAuth`, stored credentials and env alike -- no parallel
+   * auth table to drift), memoized per session. A provider whose check itself
+   * errors stays listed (fail open on the CHECK): using it still fails loudly
+   * at prompt time with the provider's own error, while hiding it would
+   * silently vanish working models over one flaky read.
    */
-  availableModels(): Array<{ value: string; name: string; description: string }> {
+  private modelOptionsMemo: Array<{ value: string; name: string; description: string }> | null =
+    null;
+
+  async availableModels(): Promise<Array<{ value: string; name: string; description: string }>> {
+    if (!this.modelOptionsMemo) {
+      this.modelOptionsMemo = await this.buildModelOptions();
+    }
+    return this.modelOptionsMemo;
+  }
+
+  private async buildModelOptions(): Promise<
+    Array<{ value: string; name: string; description: string }>
+  > {
+    let models: any[] = [];
     try {
-      const models = this.modelRuntime?.getModels?.() as any[] | undefined;
-      if (!Array.isArray(models)) return [];
-      const seen = new Set<string>();
-      const out: Array<{ value: string; name: string; description: string }> = [];
-      for (const m of models) {
-        const id = (m as any)?.id;
-        if (typeof id !== "string" || !id) continue;
-        const value = qualifyModelId(m);
-        if (seen.has(value)) continue;
-        seen.add(value);
-        const provider = (m as any)?.provider ?? (m as any)?.providerId;
-        out.push({
-          value,
-          name: id.includes("/") ? value : id,
-          description: typeof provider === "string" ? provider : "",
-        });
-      }
-      out.sort((a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
-      return out;
+      const all = this.modelRuntime?.getModels?.() as any[] | undefined;
+      if (Array.isArray(all)) models = all;
     } catch {
       return [];
     }
+    // One auth check per provider, not per model.
+    const providers: string[] = [];
+    const seenProviders = new Set<string>();
+    for (const m of models) {
+      const p = providerOf(m);
+      if (p && !seenProviders.has(p)) {
+        seenProviders.add(p);
+        providers.push(p);
+      }
+    }
+    const usable = new Set<string>();
+    await Promise.all(
+      providers.map(async (p) => {
+        try {
+          if (await this.modelRuntime?.getAuth?.(p)) usable.add(p);
+        } catch (err) {
+          console.error(
+            `[pi-acp] auth check failed for provider ${p}, keeping its models listed`,
+          );
+          usable.add(p);
+        }
+      }),
+    );
+    const seen = new Set<string>();
+    const out: Array<{ value: string; name: string; description: string }> = [];
+    for (const m of models) {
+      const provider = providerOf(m);
+      if (!provider || !usable.has(provider)) continue;
+      const id = (m as any)?.id;
+      if (typeof id !== "string" || !id) continue;
+      const value = qualifyModelId(m);
+      if (seen.has(value)) continue;
+      seen.add(value);
+      out.push({
+        value,
+        name: id.includes("/") ? value : id,
+        description: provider,
+      });
+    }
+    out.sort((a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
+    return out;
   }
 
   /**
@@ -887,6 +932,12 @@ function resolveWantedModel(modelRuntime: any, wanted: string | undefined): any 
  * accepts back. Bare ids pass through (a custom runtime may already qualify
  * them); models without a usable id fall back to pi's default label.
  */
+/** The provider spelling of a pi model entry, if it names one. */
+function providerOf(m: any): string | null {
+  const provider = m?.provider ?? m?.providerId;
+  return typeof provider === "string" && provider ? provider : null;
+}
+
 function qualifyModelId(m: any): string {
   const id = m?.id;
   if (typeof id !== "string" || !id) return "pi-default";
