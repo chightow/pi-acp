@@ -1,6 +1,6 @@
 /**
  * One-off capture for the Crew frame-replay corpus (slice 5b): drives pi-acp
- * through a bridged-tool turn exactly like slice4, but records every
+ * through a bridged-tool turn exactly like the mcp-bridge test, but records every
  * agent->client line to test/fixtures/acp_frames/pi/permission-live.raw.jsonl.
  *
  * Requires PI_ACP_MODEL with real tool calls. Auth failure -> SKIP.

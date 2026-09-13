@@ -3,7 +3,7 @@
  * lines only) to test/compact-live.raw.jsonl, curatable into Crew's
  * test/fixtures/acp_frames/pi/compact.jsonl.
  *
- * Mirrors test/slice8-compact.mjs: tiny probe, bare /compact (failed: nothing
+ * Mirrors test/compact.mjs: tiny probe, bare /compact (failed: nothing
  * to compact), 3 bulk primers (>20k tokens), /compact with context
  * (completed + summary + meter reset), post-compact probe. Key frames are
  * asserted; the raw file is CURATED (contiguous slice + _meta header +

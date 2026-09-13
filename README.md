@@ -74,13 +74,13 @@ node dist/index.js     # speak ACP on stdio (normally spawned by Crew)
 ## Test it
 
 ```sh
-node test/slice1-handshake.mjs   # keyless framing/handshake gate (needs PI_ACP_ECHO=1)
-node test/slice2-pi-prompt.mjs   # prompt demux, usage shapes
-node test/slice3-permission.mjs  # gate: ask / deny / allow_always
-node test/slice4-mcp.mjs         # bridge via test/toy-mcp-server.mjs
-node test/slice7-steer.mjs       # mid-turn steer + notifications
-node test/slice8-compact.mjs     # /compact statuses + meter reset
-node test/slice9-effort.mjs      # effort advertise / set / reject
+node test/handshake.mjs   # keyless framing/handshake gate (needs PI_ACP_ECHO=1)
+node test/prompt.mjs       # prompt demux, usage shapes
+node test/permission.mjs   # gate: ask / deny / allow_always
+node test/mcp-bridge.mjs   # bridge via test/toy-mcp-server.mjs
+node test/steer.mjs        # mid-turn steer + notifications
+node test/compact.mjs      # /compact statuses + meter reset
+node test/effort.mjs       # effort advertise / set / reject
 ```
 
 Live tests need a tool-capable model (flash hallucinates tool calls — never

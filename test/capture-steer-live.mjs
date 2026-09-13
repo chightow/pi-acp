@@ -3,7 +3,7 @@
  * to test/steer-live.raw.jsonl, curatable into
  * test/fixtures/acp_frames/pi/steer.jsonl.
  *
- * Mirrors test/slice7-steer.mjs: long prompt, mid-turn `_session/steer`,
+ * Mirrors test/steer.mjs: long prompt, mid-turn `_session/steer`,
  * expects {queued:true} plus steering_queued/steering_consumed
  * notifications with the unwrapped text, reply in the same in-flight turn.
  *
