@@ -32,6 +32,13 @@ import { PermissionGate, kindForTool } from "./permission.js";
 export interface SessionCallbacks {
   /** Send `session/update` notification to the ACP client. */
   notifyUpdate: (update: unknown) => void;
+  /**
+   * Send a `_kiro.dev/compaction/status` notification (kiro-cli's method
+   * shape: `params.status.type` started|completed|failed, human text on
+   * top-level `params.summary`). Rides its own method, NOT `session/update`
+   * — Crew's dispatch classifies compaction off the method, like kiro-cli.
+   */
+  notifyCompaction: (type: "started" | "completed" | "failed", summary: string) => void;
   /** Ask the ACP client for permission; resolves to Crew's verdict. */
   requestPermission: (params: {
     toolCallId: string;
@@ -124,6 +131,12 @@ export class PiSession {
   private sessionCost = 0;
   /** Steers injected into the running turn, awaiting pi's steering-drain signal. */
   private steerPending: string[] = [];
+  /**
+   * Set while a compaction (manual or automatic) has started without its
+   * terminal. A turn that ends with this still set settles it (see
+   * settleCompaction): only `end_turn` may synthesize `completed`.
+   */
+  private compactionPending = false;
 
   constructor(sessionId: string, cwd: string, cb: SessionCallbacks) {
     this.sessionId = sessionId;
@@ -355,6 +368,53 @@ export class PiSession {
           console.error(`[pi-acp:evt] ${t} ${JSON.stringify(event).slice(0, 500)}`);
         }
       }
+      // Compaction status, kiro-cli's `_kiro.dev/compaction/status` dialect.
+      // pi reports BOTH manual (/compact) and automatic (threshold/overflow)
+      // compactions as `compaction_start` / `compaction_end` on this same
+      // subscription (synchronously emitted, `started` always first — before
+      // auth, preparation, and summarization), so one handler covers both
+      // paths. The terminal + fresh usage_update here are what Crew's
+      // `compact()` drain captures mid-turn (manual) and what resets the
+      // context meter (both, claude `compact_boundary` precedent).
+      if (event?.type === "compaction_start") {
+        this.compactionPending = true;
+        this.cb.notifyCompaction("started", "");
+        return;
+      }
+      if (event?.type === "compaction_end") {
+        this.compactionPending = false;
+        // The summarization call is not a session message, so its cost never
+        // lands in message_end usage — fold it into the slice-6 cumulative
+        // accumulator here so the meter's spend stays truthful.
+        const summaryCost = event?.result?.usage?.cost?.total;
+        if (typeof summaryCost === "number" && Number.isFinite(summaryCost)) {
+          this.sessionCost += summaryCost;
+        }
+        const result = event?.result;
+        // Aborted (including session/cancel mid-compact) reports `failed`:
+        // kiro's status enum has no cancelled, and a terminal lets Crew's
+        // wait_for_compaction settle instead of timing out.
+        if (result && event?.aborted !== true) {
+          this.cb.notifyCompaction(
+            "completed",
+            typeof result.summary === "string" ? result.summary : "",
+          );
+        } else {
+          const reason =
+            typeof event?.errorMessage === "string" && event.errorMessage
+              ? event.errorMessage
+              : event?.aborted === true
+                ? "Compaction cancelled"
+                : "Compaction failed";
+          this.cb.notifyCompaction("failed", reason);
+        }
+        // Fresh meter reading: pi reports `tokens: null` (unknown until the
+        // next assistant response) right after a compaction, and the adapter
+        // reports `used: 0` so Crew's meter resets instead of holding the
+        // stale pre-compaction fill. The next turn's usage_update corrects it.
+        this.emitUsageUpdate(true);
+        return;
+      }
       const emit = (kind: "agent_message_chunk" | "agent_thought_chunk", text: string) => {
         if (!text) return;
         this.streamingText += text;
@@ -413,27 +473,84 @@ export class PiSession {
     this.streamingText = "";
     this.turnUsage = null;
     await this.piSession.prompt(text);
-    // One usage_update per turn, kiro-style: context fill from pi's OWN
-    // estimate (getContextUsage never leaves tokens null before a compaction),
-    // cumulative cost only when the provider reported any. Crew parses the
-    // FLAT shape (update.used/update.size) byte-identically to kiro-cli's.
-    const ctx = this.piSession?.getContextUsage?.();
-    if (ctx && typeof ctx.tokens === "number" && ctx.contextWindow > 0) {
-      const update: Record<string, unknown> = {
-        sessionUpdate: "usage_update",
-        used: ctx.tokens,
-        size: ctx.contextWindow,
-      };
-      if (this.sessionCost > 0) {
-        update.cost = { amount: this.sessionCost, currency: "USD" };
-      }
-      this.cb.notifyUpdate({ sessionId: this.sessionId, update });
-    }
+    // An automatic mid-turn compaction that started but never delivered its
+    // terminal settles here, before the trailing meter reading.
+    this.settleCompaction();
+    // One usage_update per turn, kiro-style (slice 6 contract, unchanged).
+    this.emitUsageUpdate(false);
     return {
       stopReason: this.cancelled ? "cancelled" : "end_turn",
       streamedText: this.streamingText,
       turnUsage: this.turnUsage,
     };
+  }
+
+  /**
+   * One flat `usage_update`, slice-6 shape (`used`/`size` from pi's own
+   * `getContextUsage`, cumulative USD `cost` once a provider reported any).
+   * Crew parses the FLAT shape (update.used/update.size) byte-identically
+   * to kiro-cli's.
+   *
+   * `zeroWhenUnknown` selects the post-compaction reset semantic: right after
+   * a compaction pi reports `tokens: null` (unknown until the next assistant
+   * response), and the adapter reports `used: 0` so Crew's meter resets to
+   * empty instead of holding the stale pre-compaction fill. A plain prompt
+   * turn passes false and keeps slice 6's skip — an unknown reading there
+   * (e.g. a cancelled turn) must not pose as empty.
+   */
+  private emitUsageUpdate(zeroWhenUnknown: boolean): void {
+    const ctx = this.piSession?.getContextUsage?.();
+    if (!ctx || !(ctx.contextWindow > 0)) return;
+    const tokens: unknown = (ctx as { tokens?: unknown }).tokens;
+    if (typeof tokens !== "number" && !zeroWhenUnknown) return;
+    const update: Record<string, unknown> = {
+      sessionUpdate: "usage_update",
+      used: typeof tokens === "number" ? tokens : 0,
+      size: ctx.contextWindow,
+    };
+    if (this.sessionCost > 0) {
+      update.cost = { amount: this.sessionCost, currency: "USD" };
+    }
+    this.cb.notifyUpdate({ sessionId: this.sessionId, update });
+  }
+
+  /**
+   * Close a `started`-without-terminal compaction at the turn's end.
+   *
+   * Mirrors Crew's `_settle_claude_compaction` (the claude adapter's automatic
+   * compactions likewise report `started` and go quiet): only a turn that
+   * reached its own natural terminal (`end_turn`) is evidence the compaction
+   * finished, so only then is `completed` synthesized. A cancelled turn clears
+   * the flag with no event and no counter reset — pressing Stop mid-compaction
+   * must not fabricate success against a context that was never summarized.
+   */
+  private settleCompaction(): void {
+    if (!this.compactionPending) return;
+    this.compactionPending = false;
+    if (this.cancelled) return;
+    console.error("[pi-acp] compaction started without terminal; settling completed at turn end");
+    this.cb.notifyCompaction("completed", "");
+    this.emitUsageUpdate(true);
+  }
+
+  /**
+   * Manual compaction for Crew's inline `/compact` (a `session/prompt` whose
+   * text is `/compact [context]`). The `started`/terminal status frames and
+   * the fresh `usage_update` are emitted by the `compaction_start` /
+   * `compaction_end` subscription above — pi emits those for manual
+   * compactions too, so the terminal strictly precedes this turn's response
+   * and Crew's `compact()` drain captures it mid-turn. The turn still ACKs
+   * `end_turn` on compaction failure (kiro-cli semantics: the failure rides
+   * the `failed` status, and Crew's `wait_for_compaction()` settles on it).
+   */
+  async compact(customInstructions?: string): Promise<{ stopReason: string }> {
+    this.cancelled = false;
+    try {
+      await this.piSession.compact(customInstructions);
+    } catch {
+      /* terminal `failed` already emitted by the subscription handler */
+    }
+    return { stopReason: this.cancelled ? "cancelled" : "end_turn" };
   }
 
   async cancel(): Promise<void> {

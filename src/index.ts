@@ -42,6 +42,10 @@ import { PiSession } from "./pi-session.js";
 // notifications pi-session.ts rides on session/update.
 const METHOD_SESSION_STEER = "_session/steer";
 
+// kiro-cli's compaction-status method (Crew's `compact()` / wait_for_compaction
+// watch this on the prompt stream). Rides its own method, NOT session/update.
+const METHOD_COMPACTION_STATUS = "_kiro.dev/compaction/status";
+
 interface SessionRecord {
   pi: PiSession;
   model: string;
@@ -191,6 +195,18 @@ async function handleRequest(id: number | string, method: string, params: any): 
       const sessionId = `ses_pi_${sessionSeq}`;
       const pi = new PiSession(sessionId, cwd, {
         notifyUpdate: notify,
+        notifyCompaction: (type, summary) => {
+          // kiro-cli's method shape: the status type rides params.status,
+          // human text rides top-level params.summary; failure detail
+          // additionally rides params.reason, the rank-2 key Crew's
+          // compaction_failure_detail walker reads.
+          const params: Record<string, unknown> = { status: { type } };
+          if (summary) {
+            params.summary = summary;
+            if (type === "failed") params.reason = summary;
+          }
+          send({ jsonrpc: "2.0", method: METHOD_COMPACTION_STATUS, params });
+        },
         requestPermission: (p) => askCrew(sessionId, p),
       });
       try {
@@ -224,6 +240,33 @@ async function handleRequest(id: number | string, method: string, params: any): 
         const messageId = nextMessageId();
         send({ jsonrpc: "2.0", method: "session/update", params: agentMessageChunk(rec.id, messageId, `pi-acp slice1 echo: ${text}`) });
         send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+        return;
+      }
+      // Slice 8: Crew's inline `/compact` — compaction requested as
+      // `session/prompt` text (`/compact` + optional trailing context as the
+      // summarizer's custom instructions), NOT via commands/execute. Runs
+      // pi.compact() instead of pi.prompt(); the `started`/terminal status
+      // notifications + fresh usage_update are emitted mid-turn by
+      // pi-session (synchronously, before this turn's response), so Crew's
+      // compact() drain captures the terminal and wait_for_compaction()
+      // settles on it. Echo sessions keep frozen slice-1 behavior above.
+      if (/^\/compact(?=\s|$)/.exec(text)) {
+        const customInstructions = text.slice("/compact".length).trim() || undefined;
+        const compactRun = rec.queue.then(async () => {
+          try {
+            const { stopReason } = await rec.pi.compact(customInstructions);
+            send({ jsonrpc: "2.0", id, result: { stopReason } });
+          } catch (err) {
+            send({
+              jsonrpc: "2.0",
+              id,
+              error: { code: INVALID_PARAMS, message: `pi compact failed: ${(err as Error).message}` },
+            });
+          }
+        });
+        // Keep the chain alive for the next prompt even if this one throws.
+        rec.queue = compactRun.catch(() => {});
+        await compactRun;
         return;
       }
       const run = rec.queue.then(async () => {
