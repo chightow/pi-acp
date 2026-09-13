@@ -14,6 +14,7 @@ Node stdio adapter translates).
 | 4 — MCP bridge | Crew's `mcpServers[]` mounted as `mcp__srv__tool` pi tools | ✅ PASS — toy stdio server listed, called through the gate, env array delivered |
 | 5 — Crew onboarding | `ACP_BACKEND_PI` in `backends.py` + probe + mirror + host contract | ✅ SELECTABLE — 5a dormant (vocab/auth/contract/corpus), 5b live (spawn+probe+PiMirror+SESSION_CONFIG routing, `NOT_SHIPPED` clear) |
 | 6 — usage_update | One `usage_update` per turn (flat `used`/`size` from pi's own `getContextUsage`, cumulative USD `cost` once a provider reports any) + flat turn-scoped token counts on the prompt response | ✅ PASS — `test/slice2-pi-prompt.mjs` pins both shapes; live corpus `test/fixtures/acp_frames/pi/usage.jsonl` (Crew) |
+| 7 — steer | kiro's `_session/steer` mid-turn extension: `{queued:true}` only while a turn streams, `<user_message>` framing stripped, injected via pi's `sendUserMessage(..., {deliverAs:"steer"})`; `steering_queued`/`steering_consumed` notifications ride `session/update` like kiro's | ✅ PASS — `test/slice7-steer.mjs` (queued + both notifications + steered reply inside the same in-flight turn); live corpus `test/fixtures/acp_frames/pi/steer.jsonl` (Crew) |
 
 Slices 1–6 ✅ PASS. Slice 3 needs `PI_ACP_MODEL` naming a tool-capable
 model (flash hallucinates tool calls) — muse-spark is the cheap test pick:

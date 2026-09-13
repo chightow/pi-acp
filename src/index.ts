@@ -33,6 +33,12 @@ import {
 } from "./acp.js";
 import { PiSession } from "./pi-session.js";
 
+// kiro-cli's mid-turn steer extension (Crew's `_session/steer`). Fire-and-
+// forget on Crew's side: the request response is a formality, and the
+// authoritative signal is the `steering_queued` / `steering_consumed`
+// notifications pi-session.ts rides on session/update.
+const METHOD_SESSION_STEER = "_session/steer";
+
 interface SessionRecord {
   pi: PiSession;
   model: string;
@@ -249,6 +255,20 @@ async function handleRequest(id: number | string, method: string, params: any): 
         await rec.pi.cancel().catch(() => {});
       }
       send({ jsonrpc: "2.0", id, result: {} });
+      return;
+    }
+    case METHOD_SESSION_STEER: {
+      const rec = typeof params?.sessionId === "string" ? sessions.get(params.sessionId) : undefined;
+      if (!rec || isEcho(rec)) {
+        send({ jsonrpc: "2.0", id, result: { queued: false } });
+        return;
+      }
+      const message = typeof params?.message === "string" ? params.message : "";
+      const queued = await rec.pi.steer(message);
+      // Crew never awaits this response (its read loop is busy with the turn),
+      // but the honest answer still costs nothing -- and an idle-session steer
+      // keeps the payload shape for the reader that pops it.
+      send({ jsonrpc: "2.0", id, result: { queued } });
       return;
     }
     case METHOD_SET_CONFIG_OPTION: {

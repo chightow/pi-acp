@@ -121,6 +121,8 @@ export class PiSession {
   private turnUsage: TurnTokenUsage | null = null;
   /** Session-cumulative billing cost in USD, from assistant message usage. */
   private sessionCost = 0;
+  /** Steers injected into the running turn, awaiting pi's steering-drain signal. */
+  private steerPending: string[] = [];
 
   constructor(sessionId: string, cwd: string, cb: SessionCallbacks) {
     this.sessionId = sessionId;
@@ -313,6 +315,20 @@ export class PiSession {
       const { text, thought } = extractStreamEvents(event);
       for (const d of text) emit("agent_message_chunk", d);
       for (const d of thought) emit("agent_thought_chunk", d);
+      if (event?.type === "queue_update" && this.steerPending.length > 0) {
+        // pi drains the steering queue into the running turn; when the array
+        // empties, every pending steer was consumed (kiro's authoritative
+        // steering_consumed signal -- the request response is fire-and-forget).
+        if ((event.steering?.length ?? 1) === 0) {
+          for (const text of this.steerPending) {
+            this.cb.notifyUpdate({
+              sessionId: this.sessionId,
+              update: { sessionUpdate: "steering_consumed", content: text },
+            });
+          }
+          this.steerPending = [];
+        }
+      }
       if (event?.type === "message_end" && event.message?.role === "assistant") {
         // Per-turn token counts + cumulative cost ride on pi's per-message
         // Usage; providers that report none leave both absent (the kiro path).
@@ -370,6 +386,36 @@ export class PiSession {
       await this.piSession.abort();
     } catch {
       /* ignore */
+    }
+  }
+
+  /** Inject a mid-turn steer, kiro-cli's ``_session/steer`` dialect. */
+  async steer(message: string): Promise<boolean> {
+    const text = (message ?? "").trim();
+    if (!text || !this.piSession || !this.piSession.isStreaming) return false;
+    // Crew wraps the steer in <user_message> tags (kiro-cli dialect); the
+    // wrapper is framing, not payload, and feeding it to the model verbatim
+    // would leak the transport into the conversation. Strip exactly that
+    // wrapper, nothing else.
+    const unwrapped = text.replace(/^<user_message>\s*/, "").replace(/\s*<\/user_message>$/, "");
+    this.steerPending.push(unwrapped);
+    this.cb.notifyUpdate({
+      sessionId: this.sessionId,
+      update: { sessionUpdate: "steering_queued", content: unwrapped },
+    });
+    try {
+      await this.piSession.sendUserMessage(unwrapped, { deliverAs: "steer" });
+      return true;
+    } catch (err) {
+      // The turn died between the isStreaming check and the injection; the
+      // steer never reached the model, so say so and clear the ledger.
+      this.steerPending = this.steerPending.filter((t) => t !== unwrapped);
+      this.cb.notifyUpdate({
+        sessionId: this.sessionId,
+        update: { sessionUpdate: "steering_cleared" },
+      });
+      console.error(`pi-acp steer: injection failed, cleared: ${(err as Error).message}`);
+      return false;
     }
   }
 
