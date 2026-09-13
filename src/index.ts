@@ -17,6 +17,7 @@
 import {
   METHOD_INITIALIZE,
   METHOD_SESSION_NEW,
+  METHOD_SESSION_LOAD,
   METHOD_SESSION_PROMPT,
   METHOD_SESSION_CANCEL,
   METHOD_SET_CONFIG_OPTION,
@@ -34,7 +35,12 @@ import {
   permissionOptions,
   permissionVerdict,
 } from "./acp.js";
-import { PiSession } from "./pi-session.js";
+import {
+  PiSession,
+  adapterMaxSessionSeq,
+  findAdapterSessionFile,
+  normalizeCwdForCompare,
+} from "./pi-session.js";
 
 // kiro-cli's mid-turn steer extension (Crew's `_session/steer`). Fire-and-
 // forget on Crew's side: the request response is a formality, and the
@@ -68,9 +74,64 @@ interface EchoSession {
   effort: string;
 }
 const sessions = new Map<string, SessionRecord | EchoSession>();
+/**
+ * Slice 10: start above the highest stored `ses_pi_N` so a restart never
+ * reissues an id that has a transcript on disk (which would fork two
+ * histories under one id and corrupt resume). Derived from the store at
+ * startup (self-healing — no counter file to corrupt); the new-path loop
+ * below additionally skips any id that gained a file after startup.
+ */
 let sessionSeq = 0;
+try {
+  if (!ECHO_MODE) sessionSeq = adapterMaxSessionSeq();
+} catch {
+  sessionSeq = 0;
+}
 const isEcho = (s: SessionRecord | EchoSession): s is EchoSession =>
   (s as EchoSession).echo === true;
+
+/** Shared session callbacks so `session/new` and `session/load` boot identically. */
+function makeSessionCallbacks(sessionId: string) {
+  return {
+    notifyUpdate: notify,
+    notifyCompaction: (type: "started" | "completed" | "failed", summary: string) => {
+      // kiro-cli's method shape: the status type rides params.status,
+      // human text rides top-level params.summary; failure detail
+      // additionally rides params.reason, the rank-2 key Crew's
+      // compaction_failure_detail walker reads.
+      const params: Record<string, unknown> = { status: { type } };
+      if (summary) {
+        params.summary = summary;
+        if (type === "failed") params.reason = summary;
+      }
+      send({ jsonrpc: "2.0", method: METHOD_COMPACTION_STATUS, params });
+    },
+    requestPermission: (p: {
+      toolCallId: string;
+      title: string;
+      kind: string;
+      rawInput: Record<string, any>;
+    }) => askCrew(sessionId, p),
+  };
+}
+
+/**
+ * Slice 10: mint a fresh `ses_pi_N` that has no stored transcript.
+ * The startup scan usually suffices; this loop covers a file that landed
+ * after startup (e.g. a concurrent adapter process).
+ */
+function mintFreshSessionId(): string {
+  for (;;) {
+    sessionSeq += 1;
+    const candidate = `ses_pi_${sessionSeq}`;
+    try {
+      if (!findAdapterSessionFile(candidate)) return candidate;
+    } catch {
+      return candidate;
+    }
+    // Collision with a stored transcript: skip it (never reuse).
+  }
+}
 
 function send(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -185,30 +246,15 @@ async function handleRequest(id: number | string, method: string, params: any): 
     }
     case METHOD_SESSION_NEW: {
       const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
-      sessionSeq += 1;
       if (ECHO_MODE) {
+        sessionSeq += 1;
         const sessionId = `ses_pi_slice1_${sessionSeq}`;
         sessions.set(sessionId, { echo: true, id: sessionId, cwd, model: "pi-default", mode: "read-only", effort: "medium" });
         send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, "pi-default", "medium") });
         return;
       }
-      const sessionId = `ses_pi_${sessionSeq}`;
-      const pi = new PiSession(sessionId, cwd, {
-        notifyUpdate: notify,
-        notifyCompaction: (type, summary) => {
-          // kiro-cli's method shape: the status type rides params.status,
-          // human text rides top-level params.summary; failure detail
-          // additionally rides params.reason, the rank-2 key Crew's
-          // compaction_failure_detail walker reads.
-          const params: Record<string, unknown> = { status: { type } };
-          if (summary) {
-            params.summary = summary;
-            if (type === "failed") params.reason = summary;
-          }
-          send({ jsonrpc: "2.0", method: METHOD_COMPACTION_STATUS, params });
-        },
-        requestPermission: (p) => askCrew(sessionId, p),
-      });
+      const sessionId = mintFreshSessionId();
+      const pi = new PiSession(sessionId, cwd, makeSessionCallbacks(sessionId));
       try {
         const mcpServers = Array.isArray(params?.mcpServers) ? params.mcpServers : [];
         await pi.start(mcpServers);
@@ -217,6 +263,82 @@ async function handleRequest(id: number | string, method: string, params: any): 
           jsonrpc: "2.0",
           id,
           error: { code: INVALID_PARAMS, message: `pi session failed: ${(err as Error).message}` },
+        });
+        return;
+      }
+      sessions.set(sessionId, { pi, model: pi.modelId(), mode: "read-only", effort: pi.effort(), queue: Promise.resolve() });
+      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId(), pi.effort()) });
+      return;
+    }
+    case METHOD_SESSION_LOAD: {
+      // Slice 10 — ACP resume. Same envelope as session/new (sessionId +
+      // configOptions incl. current model/mode/effort; NO modes block — the
+      // LOAD_WITHOUT_MODES precedent). Unknown ids ERROR so Crew falls back
+      // to session/new. cwd mismatches fail closed like slice 9's unknown
+      // values. MCP re-declared on the load params reconnects BEFORE the
+      // resume so the session keeps its tools.
+      const sessionId = params?.sessionId;
+      if (typeof sessionId !== "string" || !sessionId) {
+        send({
+          jsonrpc: "2.0",
+          id,
+          error: { code: INVALID_PARAMS, message: `unknown session ${String(sessionId)}` },
+        });
+        return;
+      }
+      const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
+      if (ECHO_MODE) {
+        const rec = sessions.get(sessionId);
+        if (rec && isEcho(rec)) {
+          send({ jsonrpc: "2.0", id, result: buildSessionNewResult(rec.id, rec.model, rec.effort) });
+        } else {
+          send({
+            jsonrpc: "2.0",
+            id,
+            error: { code: INVALID_PARAMS, message: `unknown session ${sessionId}` },
+          });
+        }
+        return;
+      }
+      // Live in this process already (e.g. double-load): re-declare nothing,
+      // just re-report the envelope. cwd still enforced fail-closed.
+      const live = sessions.get(sessionId);
+      if (live && !isEcho(live)) {
+        if (normalizeCwdForCompare(live.pi.cwd) !== normalizeCwdForCompare(cwd)) {
+          send({
+            jsonrpc: "2.0",
+            id,
+            error: {
+              code: INVALID_PARAMS,
+              message: `session cwd mismatch: stored ${live.pi.cwd} vs requested ${cwd}`,
+            },
+          });
+          return;
+        }
+        send({
+          jsonrpc: "2.0",
+          id,
+          result: buildSessionNewResult(sessionId, live.pi.modelId(), live.pi.effort()),
+        });
+        return;
+      }
+      if (live && isEcho(live)) {
+        send({
+          jsonrpc: "2.0",
+          id,
+          error: { code: INVALID_PARAMS, message: `unknown session ${sessionId}` },
+        });
+        return;
+      }
+      const pi = new PiSession(sessionId, cwd, makeSessionCallbacks(sessionId));
+      try {
+        const mcpServers = Array.isArray(params?.mcpServers) ? params.mcpServers : [];
+        await pi.resume(mcpServers);
+      } catch (err) {
+        send({
+          jsonrpc: "2.0",
+          id,
+          error: { code: INVALID_PARAMS, message: (err as Error).message },
         });
         return;
       }

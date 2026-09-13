@@ -38,6 +38,12 @@ permission gate, all held in-process (`src/pi-session.ts`):
   `completed|failed` on `_kiro.dev/compaction/status` plus a fresh
   `usage_update`. Automatic threshold/overflow compactions ride the same
   frames; a `started` without a terminal settles at turn end.
+- **Sessions** — adapter sessions persist under `<agentDir>/sessions/pi-acp/`
+  (`PI_ACP_SESSION_DIR` overrides), namespaced away from interactive
+  sessions. `session/load` reopens a session by id — model, thinking level,
+  and messages restored — with a fresh permission cache and steering ledger,
+  so a resumed session re-asks. `session/new` ids never repeat across
+  restarts; unknown ids and cwd mismatches error fail-closed.
 - **Effort** — `session/new` advertises an `effort` selector (`low→max`);
   `session/set_config_option{effort}` maps onto pi's `setThinkingLevel`,
   fail-closed (unknown values rejected, old level keeps serving), with a
@@ -48,10 +54,11 @@ pre-approve past the gate.
 
 ## Protocol surface
 
-Requests handled: `initialize`, `session/new`, `session/prompt`,
+Requests handled: `initialize`, `session/new`, `session/load`,
+`session/prompt`,
 `session/cancel`, `session/set_config_option`, kiro's `_session/steer`.
 Anything else answers `-32601` (unknown method); `session/new` takes an
-optional `mcpServers` array. Advertised: `loadSession: false`, MCP over
+optional `mcpServers` array. Advertised: `loadSession: true`, MCP over
 stdio/http/sse, embedded-context + image prompts, and `model` / `mode`
 selectors (`mode` is always `read-only` — every tool call asks).
 
@@ -81,6 +88,7 @@ node test/mcp-bridge.mjs   # bridge via test/toy-mcp-server.mjs
 node test/steer.mjs        # mid-turn steer + notifications
 node test/compact.mjs      # /compact statuses + meter reset
 node test/effort.mjs       # effort advertise / set / reject
+node test/load.mjs         # two-process resume: persist, reload, continue
 ```
 
 Live tests need a tool-capable model (flash hallucinates tool calls — never

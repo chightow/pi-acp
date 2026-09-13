@@ -11,7 +11,22 @@
  * - Project trust is forced off (`resolveProjectTrust: false`): `.pi/`
  *   project extensions/packages must not pre-approve past the gate —
  *   the Claude `.claude/settings.json` injection lesson.
+ * - Slice 10 — persistence: adapter sessions are file-backed under a
+ *   dedicated dir (NOT the user's default session dir). The sessionId↔file
+ *   mapping is: ACP `ses_pi_N` → pi session header `id == ses_pi_N` in a
+ *   file `<timestamp>_ses_pi_N.jsonl` under `getAdapterSessionDir()`
+ *   (`<agentDir>/sessions/pi-acp/`, overridable via `PI_ACP_SESSION_DIR`).
+ *   Namespacing keeps adapter transcripts out of the user's interactive
+ *   sessions (resuming those would leak foreign transcripts). `start()`
+ *   creates (`SessionManager.create(cwd, dir, {id})`); `resume()` opens
+ *   the stored file (`SessionManager.open`) so `createAgentSession` restores
+ *   model/thinking/messages from `buildSessionContext()`. A resume boots a
+ *   FRESH `PiSession` — the `allow_always` cache and steering ledger are
+ *   deliberately dropped (a resumed session re-asks).
  */
+import { existsSync, mkdirSync, openSync, readSync, closeSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import {
   SessionManager,
   createAgentSessionFromServices,
@@ -28,6 +43,134 @@ import {
   type McpConnection,
 } from "./mcp-bridge.js";
 import { PermissionGate, kindForTool } from "./permission.js";
+
+// ── Adapter session store (slice 10) ──────────────────────────────
+
+/** Agent dir honoring the same `PI_AGENT_DIR` seam as the session boot. */
+export function resolveAdapterAgentDir(): string {
+  const env = process.env.PI_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR;
+  if (env && env.trim()) return env;
+  const home = process.env.HOME ?? homedir();
+  return path.join(home, ".pi", "agent");
+}
+
+/**
+ * Dedicated dir for adapter transcripts. `PI_ACP_SESSION_DIR` overrides
+ * (tests point two processes at one temp dir); otherwise namespaced under
+ * `<agentDir>/sessions/pi-acp/` — never the user's per-cwd default dir.
+ */
+export function getAdapterSessionDir(): string {
+  const override = process.env.PI_ACP_SESSION_DIR;
+  if (override && override.trim()) {
+    const dir = override;
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+  const dir = path.join(resolveAdapterAgentDir(), "sessions", "pi-acp");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Read just the session header id (first JSONL line) without loading history. */
+function readHeaderId(filePath: string): string | null {
+  let fd = -1;
+  try {
+    fd = openSync(filePath, "r");
+    const buf = Buffer.alloc(16384);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString("utf8");
+    const line = text.split("\n")[0] ?? "";
+    if (!line.trim()) return null;
+    const header = JSON.parse(line);
+    return typeof header?.id === "string" ? header.id : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      if (fd >= 0) closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * sessionId↔file mapping: scan the adapter dir for the file whose pi header
+ * `id` equals the ACP sessionId. Header is truth (not the filename — pi
+ * names files `<timestamp>_<id>.jsonl`, but only the header survives
+ * renames/copies).
+ */
+export function findAdapterSessionFile(sessionId: string): string | null {
+  let dir: string;
+  try {
+    dir = getAdapterSessionDir();
+  } catch {
+    return null;
+  }
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const full = path.join(dir, name);
+    try {
+      if (readHeaderId(full) === sessionId) return full;
+    } catch {
+      /* skip unreadable files */
+    }
+  }
+  return null;
+}
+
+/** All adapter-stored session ids (header scan; skips unreadable files). */
+export function listAdapterSessionIds(): string[] {
+  const out: string[] = [];
+  let dir: string;
+  try {
+    dir = getAdapterSessionDir();
+  } catch {
+    return out;
+  }
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const id = readHeaderId(path.join(dir, name));
+    if (id) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Highest `ses_pi_N` counter in the store (0 when empty). `session/new`
+ * starts above this so a restart never reissues an id that has a stored
+ * transcript (which would corrupt resume by forking two histories).
+ */
+export function adapterMaxSessionSeq(): number {
+  let max = 0;
+  for (const id of listAdapterSessionIds()) {
+    const m = /^ses_pi_(\d+)$/.exec(id);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+  }
+  return max;
+}
+
+/** Normalize cwds before comparing (pi stores `resolvePath(cwd)`). */
+export function normalizeCwdForCompare(cwd: string): string {
+  const resolved = path.resolve(cwd);
+  const noSep = resolved.replace(/[/\\]+$/, "");
+  return process.platform === "win32" ? noSep.toLowerCase() : noSep;
+}
 
 export interface SessionCallbacks {
   /** Send `session/update` notification to the ACP client. */
@@ -117,6 +260,8 @@ export interface PromptResult {
 export class PiSession {
   readonly sessionId: string;
   readonly cwd: string;
+  /** pi session file backing this ACP session (undefined until boot). */
+  private sessionFile: string | undefined = undefined;
   private piSession: any = null;
   private mcpConns: McpConnection[] = [];
   private bridgedByPiName = new Map<string, { conn: McpConnection; tool: BridgedTool }>();
@@ -218,7 +363,57 @@ export class PiSession {
     return this.effort();
   }
 
+  /** pi session file backing this ACP session, if booted file-backed. */
+  getSessionFile(): string | undefined {
+    return this.sessionFile;
+  }
+
+  /**
+   * Slice 10 — create path: fresh file-backed transcript keyed by the ACP
+   * sessionId (`SessionManager.create(cwd, adapterDir, {id})`).
+   */
   async start(mcpServers: McpServerDef[]): Promise<void> {
+    const dir = getAdapterSessionDir();
+    const manager = SessionManager.create(this.cwd, dir, { id: this.sessionId });
+    this.sessionFile = manager.getSessionFile();
+    await this.boot(mcpServers, manager, { restoreModel: false });
+  }
+
+  /**
+   * Slice 10 — resume path: open the stored file for this id and let
+   * `createAgentSession` restore model/thinking/messages from
+   * `buildSessionContext()`. A resume boots a FRESH `PiSession`, so the
+   * `allow_always` cache and steering ledger start empty (a resumed session
+   * re-asks). Throws on unknown id or cwd mismatch — the caller maps to
+   * `INVALID_PARAMS` so Crew falls back to `session/new`.
+   */
+  async resume(mcpServers: McpServerDef[]): Promise<void> {
+    const file = findAdapterSessionFile(this.sessionId);
+    if (!file) throw new Error(`unknown session ${this.sessionId}`);
+    const manager = SessionManager.open(file, getAdapterSessionDir());
+    if (manager.getSessionId() !== this.sessionId) {
+      throw new Error(`unknown session ${this.sessionId}`);
+    }
+    const storedCwd = manager.getCwd();
+    if (normalizeCwdForCompare(storedCwd) !== normalizeCwdForCompare(this.cwd)) {
+      throw new Error(`session cwd mismatch: stored ${storedCwd} vs requested ${this.cwd}`);
+    }
+    this.sessionFile = manager.getSessionFile();
+    await this.boot(mcpServers, manager, { restoreModel: true });
+  }
+
+  /**
+   * Shared boot: MCP connect → session create-or-resume → subscribe.
+   * `session/new` (`start`) and `session/load` (`resume`) funnel here so
+   * the two paths cannot drift (notably: MCP reconnect rides BOTH — a
+   * resumed session re-declares its whole surface or comes back with no
+   * tools — and the gate extension + subscriptions are identical).
+   */
+  private async boot(
+    mcpServers: McpServerDef[],
+    sessionManager: SessionManager,
+    opts: { restoreModel: boolean },
+  ): Promise<void> {
     // 1. Connect MCP servers first so their tools exist before pi boots
     //    (pi snapshots the tool list at session creation).
     for (const def of mcpServers ?? []) {
@@ -327,11 +522,15 @@ export class PiSession {
       });
     };
 
-    const agentDir = process.env.PI_AGENT_DIR ?? `${process.env.HOME ?? "~"}/.pi/agent`;
+    const agentDir = resolveAdapterAgentDir();
     // Two-phase creation so the model id resolves against the runtime before
     // the session boots. PI_ACP_MODEL selects `provider/id` (or a bare id
     // searched across providers); unset means pi's configured default.
     // Slice 5 will drive this from session/set_config_option instead of env.
+    // Slice 10: on resume (`restoreModel`) pass NO explicit model so
+    // `createAgentSession` restores provider/model/thinking/messages from
+    // `sessionManager.buildSessionContext()`; on create pass the wanted
+    // model so the fresh transcript records it (model_change entry).
     const services = await createAgentSessionServices({
       cwd: this.cwd,
       agentDir,
@@ -346,13 +545,13 @@ export class PiSession {
     this.modelRuntime = services.modelRuntime;
     const { session } = await createAgentSessionFromServices({
       services,
-      // In-memory: Crew (or the harness, per HARNESS_OWNED_SESSIONS) owns
-      // transcripts; pi-side persistence would only strand resume state for
-      // a session/load we do not advertise (initialize: loadSession false).
-      sessionManager: SessionManager.inMemory(),
-      model: resolveWantedModel(services.modelRuntime, process.env.PI_ACP_MODEL),
+      sessionManager,
+      model: opts.restoreModel
+        ? undefined
+        : resolveWantedModel(services.modelRuntime, process.env.PI_ACP_MODEL),
       customTools: customTools as any,
     });
+    this.sessionFile = session.sessionManager?.getSessionFile?.() ?? this.sessionFile;
     this.piSession = session;
 
     // Best-effort text streaming -> agent_message_chunk. Deltas stream live;
