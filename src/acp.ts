@@ -57,11 +57,15 @@ export function buildInitializeResult() {
   return {
     protocolVersion: 1,
     agentCapabilities: {
-      loadSession: false,
+      // Slice 10: Crew resumes harness-owned sessions via `session/load`.
+      // Unknown ids error (Crew falls back to `session/new`); resumed
+      // sessions re-declare their MCP surface on the load params.
+      loadSession: true,
       mcpCapabilities: { stdio: true, http: true, sse: true },
       promptCapabilities: { embeddedContext: true, image: true },
-      // No sessionCapabilities advertised: we own sessions in-process,
-      // one pi AgentSession per ACP sessionId.
+      // No sessionCapabilities advertised: we own sessions, one pi
+      // AgentSession per ACP sessionId (slice 10: file-backed under the
+      // adapter session dir so `session/load` can resume across restarts).
     },
     authMethods: [],
     agentInfo: { name: "pi-acp", version: "0.1.0" },
