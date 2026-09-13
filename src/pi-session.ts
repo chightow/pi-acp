@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { McpServerDef } from "./acp.js";
+import { EFFORT_LEVELS } from "./acp.js";
 import {
   callBridgedTool,
   closeMcpConnection,
@@ -147,6 +148,61 @@ export class PiSession {
       /* ignore */
     }
     return "pi-default";
+  }
+
+  /**
+   * Slice 9 — current reasoning-effort level (pi `thinkingLevel`).
+   * Falls back to pi's global default (`medium`) before boot.
+   */
+  effort(): string {
+    try {
+      const level = this.piSession?.thinkingLevel;
+      if (typeof level === "string" && level) return level;
+    } catch {
+      /* ignore */
+    }
+    return "medium";
+  }
+
+  /** Alias for `effort()` — pi SDK vocabulary. */
+  thinkingLevel(): string {
+    return this.effort();
+  }
+
+  /** Levels advertised in the `effort` configOption: the 5 Crew levels in
+   *  order (see EFFORT_LEVELS in acp.ts for why `off`/`minimal` stay out). */
+  availableEffortLevels(): string[] {
+    return [...EFFORT_LEVELS];
+  }
+
+  /** pi-native capability list for the current model (may be narrower than
+   *  the advertised 5 — e.g. muse-spark lacks `max`). Informational; the
+   *  adapter advertises the static 5 and lets pi clamp. */
+  availableThinkingLevels(): string[] {
+    try {
+      const levels = this.piSession?.getAvailableThinkingLevels?.();
+      if (Array.isArray(levels)) return [...levels];
+    } catch {
+      /* ignore */
+    }
+    return [...EFFORT_LEVELS];
+  }
+
+  /**
+   * Slice 9 — set reasoning effort. Validates against EFFORT_LEVELS
+   * (unknown → throw, caller keeps serving the old level — the slice-5
+   * `setModel` fail-closed precedent; message mirrors claude-agent-acp's
+   * `Invalid value for config option effort: <level>` so Crew's step-down
+   * ladder recognizes it as a value rejection). On success pi clamps to
+   * model capabilities internally; returns the ACTUAL post-clamp level.
+   */
+  setEffort(level: string): string {
+    if (!(EFFORT_LEVELS as readonly string[]).includes(level)) {
+      throw new Error(`Invalid value for config option effort: ${String(level)}`);
+    }
+    if (!this.piSession) throw new Error(`pi session not started`);
+    this.piSession.setThinkingLevel(level);
+    return this.effort();
   }
 
   async start(mcpServers: McpServerDef[]): Promise<void> {

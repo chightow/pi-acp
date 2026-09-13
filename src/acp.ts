@@ -94,7 +94,7 @@ export interface SessionNewParams {
   _meta?: Record<string, any>;
 }
 
-export function buildSessionNewResult(sessionId: string, modelId: string) {
+export function buildSessionNewResult(sessionId: string, modelId: string, effortCurrent: string = "medium") {
   return {
     sessionId,
     // Advertised selects. `model` buys KiroCrew's ADVERTISED_MODEL_SELECTION
@@ -102,30 +102,105 @@ export function buildSessionNewResult(sessionId: string, modelId: string) {
     // `mode` buys the SESSION_CONFIG permission routing: Crew asserts
     // `mode=read-only` before the first prompt and refuses the session
     // otherwise — see codex-acp precedent.
-    configOptions: [
-      {
-        id: "model",
-        name: "Model",
-        category: "model",
-        type: "select",
-        currentValue: modelId,
-        options: [{ value: modelId, name: modelId }],
-      },
-      {
-        id: "mode",
-        name: "Session Mode",
-        category: "mode",
-        type: "select",
-        currentValue: "read-only",
-        options: [
-          {
-            value: "read-only",
-            name: "read-only",
-            description: "Every tool call asks KiroCrew for permission.",
-          },
-        ],
-      },
-    ],
+    // `effort` buys kiro's reasoning-effort knob (slice 9): Crew parses
+    // `configOptions` for `id=="effort"`, reads `options[].value` in ACP
+    // order into the dashboard allow-list, and pushes levels back over
+    // `session/set_config_option`. See EFFORT_LEVELS below for the
+    // advertise-only-5 decision.
+    configOptions: buildConfigOptions(modelId, "read-only", effortCurrent),
+  };
+}
+
+/**
+ * Slice 9 — effort knob parity (kiro's reasoning-effort selector).
+ *
+ * Single source of truth Crew-side is `src/kiro_crew/effort.py`:
+ * `EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")`, ordered
+ * low→max. `""` is NOT a level (means "provider default").
+ *
+ * Decisions (documented per brief):
+ * - Advertise ONLY the 5 Crew levels, in EFFORT_LEVELS order. pi's thinking
+ *   vocabulary is `off | minimal | low | medium | high | xhigh | max`
+ *   (`pi --thinking` help); the overlap with Crew is exact for the 5, and
+ *   `off`/`minimal` would hide reasoning Crew expects, so they are never
+ *   advertised (pi may still report them as currentValue on models whose
+ *   default sits outside the 5 — the selector stays the 5).
+ * - `""`/absent maps to pi default: the initial `currentValue` is pi's own
+ *   `thinkingLevel` for the model (global default `medium` unless a
+ *   per-model override applies). `""` is never advertised and is rejected
+ *   as an invalid value if sent — same fail-closed stance as slice 5's
+ *   `setModel` (unknown values throw, adapter keeps serving the old level).
+ * - pi clamps to model capabilities (`setThinkingLevel` → `clampThinkingLevel`;
+ *   e.g. muse-spark has no `max` mapping, so `max` settles to `xhigh`). The
+ *   adapter accepts any of the 5 and reports the post-clamp actual level in
+ *   the follow-up `config_option_update` notification; Crew's step-down ladder
+ *   (`_set_effort_config_option`) treats a rejection as "try lower", so a
+ *   future per-model filter would compose without changing this contract.
+ */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export function isValidEffort(value: unknown): value is EffortLevel {
+  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+function effortDisplayName(value: string): string {
+  return value.length > 0 ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
+export function buildEffortConfigOption(currentValue: string) {
+  return {
+    id: "effort",
+    name: "Effort",
+    description: "Reasoning depth for this model",
+    category: "effort",
+    type: "select",
+    currentValue,
+    options: EFFORT_LEVELS.map((value) => ({ value, name: effortDisplayName(value) })),
+  };
+}
+
+/** Full `configOptions` array (model + mode + effort) for `session/new` and
+ *  for the `config_option_update` notification Crew's
+ *  `_handle_config_option_update` consumes (full-array replace). */
+export function buildConfigOptions(modelId: string, mode: string, effortCurrent: string) {
+  return [
+    {
+      id: "model",
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: modelId,
+      options: [{ value: modelId, name: modelId }],
+    },
+    {
+      id: "mode",
+      name: "Session Mode",
+      category: "mode",
+      type: "select",
+      currentValue: mode,
+      options: [
+        {
+          value: "read-only",
+          name: "read-only",
+          description: "Every tool call asks KiroCrew for permission.",
+        },
+      ],
+    },
+    buildEffortConfigOption(effortCurrent),
+  ];
+}
+
+/** `session/update` params for a `config_option_update` push (e.g. after a
+ *  model switch rebuilds effort options). Crew replaces its whole
+ *  `_acp_config_options` array and re-syncs the dashboard allow-list. */
+export function buildConfigOptionUpdate(sessionId: string, configOptions: unknown) {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: "config_option_update",
+      configOptions,
+    },
   };
 }
 

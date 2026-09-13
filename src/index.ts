@@ -25,6 +25,9 @@ import {
   INVALID_PARAMS,
   buildInitializeResult,
   buildSessionNewResult,
+  buildConfigOptions,
+  buildConfigOptionUpdate,
+  isValidEffort,
   promptBlocksToText,
   agentMessageChunk,
   nextMessageId,
@@ -43,6 +46,8 @@ interface SessionRecord {
   pi: PiSession;
   model: string;
   mode: string;
+  /** Last applied effort level (pi thinkingLevel). Mirrors pi.effort(). */
+  effort: string;
   /** Serializes prompts: Crew waits for stopReason, but never pipeline. */
   queue: Promise<void>;
 }
@@ -56,6 +61,7 @@ interface EchoSession {
   cwd: string;
   model: string;
   mode: string;
+  effort: string;
 }
 const sessions = new Map<string, SessionRecord | EchoSession>();
 let sessionSeq = 0;
@@ -178,8 +184,8 @@ async function handleRequest(id: number | string, method: string, params: any): 
       sessionSeq += 1;
       if (ECHO_MODE) {
         const sessionId = `ses_pi_slice1_${sessionSeq}`;
-        sessions.set(sessionId, { echo: true, id: sessionId, cwd, model: "pi-default", mode: "read-only" });
-        send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, "pi-default") });
+        sessions.set(sessionId, { echo: true, id: sessionId, cwd, model: "pi-default", mode: "read-only", effort: "medium" });
+        send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, "pi-default", "medium") });
         return;
       }
       const sessionId = `ses_pi_${sessionSeq}`;
@@ -198,8 +204,8 @@ async function handleRequest(id: number | string, method: string, params: any): 
         });
         return;
       }
-      sessions.set(sessionId, { pi, model: pi.modelId(), mode: "read-only", queue: Promise.resolve() });
-      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId()) });
+      sessions.set(sessionId, { pi, model: pi.modelId(), mode: "read-only", effort: pi.effort(), queue: Promise.resolve() });
+      send({ jsonrpc: "2.0", id, result: buildSessionNewResult(sessionId, pi.modelId(), pi.effort()) });
       return;
     }
     case METHOD_SESSION_PROMPT: {
@@ -274,12 +280,71 @@ async function handleRequest(id: number | string, method: string, params: any): 
     case METHOD_SET_CONFIG_OPTION: {
       const rec = typeof params?.sessionId === "string" ? sessions.get(params.sessionId) : undefined;
       if (rec) {
+        const sid = params.sessionId as string;
         if (params?.configId === "model" && typeof params?.value === "string") {
-          rec.model = params.value;
-          if (!isEcho(rec)) await rec.pi.setModel(params.value).catch(() => {});
-        }
-        if (params?.configId === "mode" && typeof params?.value === "string") {
+          // Fail-closed (slice-5 precedent): unknown model ids throw and Crew
+          // keeps serving the old model — no silent downgrade. On success the
+          // thinking level may have reset for the new model, so the
+          // follow-up config_option_update carries the rebuilt effort options
+          // (full-array replace Crew's _handle_config_option_update consumes).
+          if (isEcho(rec)) {
+            rec.model = params.value;
+            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, rec.effort)));
+          } else {
+            try {
+              await rec.pi.setModel(params.value);
+            } catch (err) {
+              send({
+                jsonrpc: "2.0",
+                id,
+                error: { code: INVALID_PARAMS, message: `Invalid value for config option model: ${params.value} (${(err as Error).message})` },
+              });
+              return;
+            }
+            rec.model = rec.pi.modelId();
+            rec.effort = rec.pi.effort();
+            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, rec.effort)));
+          }
+        } else if (params?.configId === "effort") {
+          // Slice 9 — effort knob → pi thinking level. Unknown values throw
+          // (fail-closed, old level keeps serving); message mirrors
+          // claude-agent-acp so Crew's step-down ladder recognizes it.
+          const value = params?.value;
+          if (!isValidEffort(value)) {
+            send({
+              jsonrpc: "2.0",
+              id,
+              error: { code: INVALID_PARAMS, message: `Invalid value for config option effort: ${String(value)}` },
+            });
+            return;
+          }
+          if (isEcho(rec)) {
+            rec.effort = value;
+            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, rec.effort)));
+          } else {
+            let actual: string;
+            try {
+              actual = rec.pi.setEffort(value);
+            } catch (err) {
+              send({
+                jsonrpc: "2.0",
+                id,
+                error: { code: INVALID_PARAMS, message: (err as Error).message },
+              });
+              return;
+            }
+            rec.effort = actual;
+            notify(buildConfigOptionUpdate(sid, buildConfigOptions(rec.model, rec.mode, actual)));
+          }
+        } else if (params?.configId === "mode" && typeof params?.value === "string") {
           rec.mode = params.value;
+        } else {
+          send({
+            jsonrpc: "2.0",
+            id,
+            error: { code: INVALID_PARAMS, message: `Unknown config option: ${String(params?.configId)}` },
+          });
+          return;
         }
       }
       send({ jsonrpc: "2.0", id, result: {} });
