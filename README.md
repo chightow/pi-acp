@@ -57,8 +57,7 @@ pre-approve past the gate.
 
 ## Protocol surface
 
-Requests handled: `initialize`, `session/new`, `session/load`,
-`session/prompt`,
+Requests handled: `initialize`, `session/new`, `session/load`, `session/prompt`,
 `session/cancel`, `session/set_config_option`, kiro's `_session/steer`.
 Anything else answers `-32601` (unknown method); `session/new` takes an
 optional `mcpServers` array. Advertised: `loadSession: true`, MCP over
@@ -92,14 +91,14 @@ node test/steer.mjs        # mid-turn steer + notifications
 node test/compact.mjs      # /compact statuses + meter reset
 node test/effort.mjs       # effort advertise / set / reject
 node test/load.mjs         # two-process resume: persist, reload, continue
-node test/member-dispatch.mjs  # dispatch-shaped mount + gate (via dispatch-mcp-server.mjs)
+node test/member-dispatch.mjs   # dispatch-shaped mount + gate (via dispatch-mcp-server.mjs)
 ```
 
 Live tests need a tool-capable model (flash hallucinates tool calls — never
 use it); the cheap pick is:
 
 ```sh
-PI_ACP_MODEL="opencode-go/muse-spark-1.3-contributor" node test/slice3-permission.mjs
+PI_ACP_MODEL="opencode-go/muse-spark-1.3-contributor" node test/permission.mjs
 ```
 
 `PI_ACP_MODEL` (`provider/id` or bare id) is the dev-time seam for model
@@ -110,7 +109,7 @@ corpus (`test/fixtures/acp_frames/pi/` on the Crew side).
 `PI_ACP_DEBUG_EVENTS=1` logs pi session event types (first 8 of each) to
 stderr while developing.
 
-## Auth model (applies from slice 2 on)
+## Auth model
 
 BYO keys (`ANTHROPIC_API_KEY`, …) via pi's own auth — stored in
 `~/.pi/agent`, never env keys. No Kiro subscription.
