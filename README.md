@@ -25,7 +25,10 @@ permission gate, all held in-process (`src/pi-session.ts`):
 - **MCP bridge** (`src/mcp-bridge.ts`) — Crew's `mcpServers[]` mount as pi
   custom tools named `mcp__<server>__<tool>`, connected before the pi session
   boots (pi snapshots its tool list at creation). MCP JSON Schema passes
-  through to TypeBox losslessly.
+  through to TypeBox losslessly. Crew's member-dispatch entry (the
+  `kirocrew-dashboard` session-control server) rides the same mount — its
+  identity env arrives byte-identical and its verbs ask permission like any
+  other tool.
 - **Usage** — one flat `usage_update` per turn (`used`/`size` from pi's own
   `getContextUsage`, cumulative USD `cost` once any provider reports one),
   plus flat turn-scoped token counts on the prompt response.
@@ -89,6 +92,7 @@ node test/steer.mjs        # mid-turn steer + notifications
 node test/compact.mjs      # /compact statuses + meter reset
 node test/effort.mjs       # effort advertise / set / reject
 node test/load.mjs         # two-process resume: persist, reload, continue
+node test/member-dispatch.mjs  # dispatch-shaped mount + gate (via dispatch-mcp-server.mjs)
 ```
 
 Live tests need a tool-capable model (flash hallucinates tool calls — never
