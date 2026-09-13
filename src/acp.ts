@@ -98,7 +98,12 @@ export interface SessionNewParams {
   _meta?: Record<string, any>;
 }
 
-export function buildSessionNewResult(sessionId: string, modelId: string, effortCurrent: string = "medium") {
+export function buildSessionNewResult(
+  sessionId: string,
+  modelId: string,
+  effortCurrent: string = "medium",
+  modelOptions?: ModelOption[],
+) {
   return {
     sessionId,
     // Advertised selects. `model` buys KiroCrew's ADVERTISED_MODEL_SELECTION
@@ -111,7 +116,7 @@ export function buildSessionNewResult(sessionId: string, modelId: string, effort
     // order into the dashboard allow-list, and pushes levels back over
     // `session/set_config_option`. See EFFORT_LEVELS below for the
     // advertise-only-5 decision.
-    configOptions: buildConfigOptions(modelId, "read-only", effortCurrent),
+    configOptions: buildConfigOptions(modelId, "read-only", effortCurrent, modelOptions),
   };
 }
 
@@ -167,7 +172,24 @@ export function buildEffortConfigOption(currentValue: string) {
 /** Full `configOptions` array (model + mode + effort) for `session/new` and
  *  for the `config_option_update` notification Crew's
  *  `_handle_config_option_update` consumes (full-array replace). */
-export function buildConfigOptions(modelId: string, mode: string, effortCurrent: string) {
+/**
+ * One entry of the `model` select: the full pi catalog, so Crew's picker can
+ * offer (and its push can validate against) every id the adapter accepts.
+ * Values are `provider/id` pairs (unambiguous when providers share a bare
+ * id); names are the bare ids for a readable dropdown.
+ */
+export interface ModelOption {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+export function buildConfigOptions(
+  modelId: string,
+  mode: string,
+  effortCurrent: string,
+  modelOptions?: ModelOption[],
+) {
   return [
     {
       id: "model",
@@ -175,7 +197,14 @@ export function buildConfigOptions(modelId: string, mode: string, effortCurrent:
       category: "model",
       type: "select",
       currentValue: modelId,
-      options: [{ value: modelId, name: modelId }],
+      options:
+        modelOptions && modelOptions.length > 0
+          ? modelOptions.map((o) => ({
+              value: o.value,
+              name: o.name || o.value,
+              description: o.description || "",
+            }))
+          : [{ value: modelId, name: modelId }],
     },
     {
       id: "mode",

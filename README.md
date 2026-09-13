@@ -62,7 +62,9 @@ Requests handled: `initialize`, `session/new`, `session/load`, `session/prompt`,
 Anything else answers `-32601` (unknown method); `session/new` takes an
 optional `mcpServers` array. Advertised: `loadSession: true`, MCP over
 stdio/http/sse, embedded-context + image prompts, and `model` / `mode`
-selectors (`mode` is always `read-only` — every tool call asks).
+selectors (`model` carries pi's full catalog as `provider/id` values, so Crew's
+picker can offer every id `set_config_option` accepts; `mode` is always
+`read-only` — every tool call asks).
 
 Agent → client traffic: `session/update` notifications (message/thought
 chunks, tool calls + updates, steering, `usage_update`,
@@ -90,6 +92,7 @@ node test/mcp-bridge.mjs   # bridge via test/toy-mcp-server.mjs
 node test/steer.mjs        # mid-turn steer + notifications
 node test/compact.mjs      # /compact statuses + meter reset
 node test/effort.mjs       # effort advertise / set / reject
+node test/model-list.mjs   # model catalog advertise / accept / reject ($0, no prompt)
 node test/load.mjs         # two-process resume: persist, reload, continue
 node test/member-dispatch.mjs   # dispatch-shaped mount + gate (via dispatch-mcp-server.mjs)
 ```

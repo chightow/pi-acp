@@ -297,15 +297,54 @@ export class PiSession {
     );
   }
 
-  /** Current model id for the `model` configOption display. Best-effort. */
+  /**
+   * Current model id for the `model` configOption, in the `provider/id`
+   * spelling the option values (and `set_config_option{model}`) use, so the
+   * advertised current always matches one offered value. Best-effort: bare
+   * id, then pi's default label.
+   */
   modelId(): string {
     try {
       const m = this.piSession?.model;
-      if (m && typeof m.id === "string") return m.id;
+      if (m && typeof m.id === "string" && m.id) return qualifyModelId(m);
     } catch {
       /* ignore */
     }
     return "pi-default";
+  }
+
+  /**
+   * Every model pi's runtime knows, as `model`-option entries. Values are
+   * `provider/id` pairs (unambiguous when providers share a bare id); names
+   * are the bare ids for a readable picker, descriptions name the provider.
+   * Sorted for a stable dropdown. Crew harvests this select into its
+   * advertised-model cache, which is what the dashboard picker reads --
+   * without it the picker can only offer the current value back.
+   */
+  availableModels(): Array<{ value: string; name: string; description: string }> {
+    try {
+      const models = this.modelRuntime?.getModels?.() as any[] | undefined;
+      if (!Array.isArray(models)) return [];
+      const seen = new Set<string>();
+      const out: Array<{ value: string; name: string; description: string }> = [];
+      for (const m of models) {
+        const id = (m as any)?.id;
+        if (typeof id !== "string" || !id) continue;
+        const value = qualifyModelId(m);
+        if (seen.has(value)) continue;
+        seen.add(value);
+        const provider = (m as any)?.provider ?? (m as any)?.providerId;
+        out.push({
+          value,
+          name: id.includes("/") ? value : id,
+          description: typeof provider === "string" ? provider : "",
+        });
+      }
+      out.sort((a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -841,6 +880,20 @@ function resolveWantedModel(modelRuntime: any, wanted: string | undefined): any 
   const found = (modelRuntime.getModels() as any[]).find((m: any) => m.id === wanted);
   if (!found) throw new Error(`unknown pi model ${wanted}`);
   return found;
+}
+
+/**
+ * `provider/id` spelling for a pi model: the vocabulary `set_config_option`
+ * accepts back. Bare ids pass through (a custom runtime may already qualify
+ * them); models without a usable id fall back to pi's default label.
+ */
+function qualifyModelId(m: any): string {
+  const id = m?.id;
+  if (typeof id !== "string" || !id) return "pi-default";
+  if (id.includes("/")) return id;
+  const provider = m?.provider ?? m?.providerId;
+  if (typeof provider === "string" && provider) return `${provider}/${id}`;
+  return id;
 }
 
 function toTypeBox(schema: Record<string, any>): any {
