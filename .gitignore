@@ -1,0 +1,7 @@
+# dependencies and build output
+node_modules/
+dist/
+
+# one-off live captures (the curated corpus lives in KiroCrew's
+# test/fixtures/acp_frames/pi/; the capture scripts rewrite these)
+*-live.raw.jsonl
